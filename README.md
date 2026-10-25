@@ -118,54 +118,387 @@ refund_agent/
 └── README.md              # This file
 ```
 
-## Architecture
-
-### Data Models (`agent/models.py`)
-
-- **Item**: `name`, `date_bought`, `price`
-- **Order**: `user_id`, `items` (list of Item)
-- **Answer**: `response` (str), `continue_conversation` (bool) — **structured output**
-- **ObservabilityEvent**: timestamp, event_type, thread_id, details, duration_ms
-- **ObservabilitySummary**: Aggregated metrics for a conversation
-
-### Tools (`agent/tools.py`)
-
-| Tool | Description |
-|------|-------------|
-| `find_user` | Look up user by user_id |
-| `calculate_refund` | Calculate refund for specific items |
-| `get_current_date` | Get current date for eligibility check |
-| `create_ticket` | Create support ticket for refund |
-
-### Agent Loop (`agent/agent.py`)
+## Architecture Overview
 
 ```
-User Input → Add to Memory → LLM with Tools
-                                    ↓
-                            Tool Calls? ──Yes──→ Execute Tools → Add Results → Loop
-                                    ↓ No
-                            Content? ──Yes──→ Structured LLM → Answer Object → Return
-                                    ↓ No
-                            Error → Return Error Answer
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           REFUND AGENT ARCHITECTURE                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌──────────────┐     ┌────────────────────────────────────────────────┐   │
+│  │   main.py    │────►│           RefundAgent (agent/agent.py)         │   │
+│  └──────────────┘     └────────────────────────────────────────────────┘   │
+│                            │                    │                    │      │
+│                            ▼                    ▼                    ▼      │
+│                     ┌─────────────┐      ┌─────────────┐      ┌─────────────┐│
+│                     │   llm_with  │      │  llm_struct │      │ Observability││
+│                     │   _tools    │      │    ured     │      │  Callback   ││
+│                     │             │      │             │      │  Handler    ││
+│                     │ • Tool call │      │ • JSON      │      │             ││
+│                     │   loop      │      │   Schema    │      │ • LLM events││
+│                     │ • Bound     │      │ • Returns   │      │ • Tool      ││
+│                     │   schemas   │      │   Answer    │      │   events    ││
+│                     └─────────────┘      └─────────────┘      └─────────────┘│
+│                            │                    │                    │      │
+│                            ▼                    ▼                    ▼      │
+│                     ┌─────────────────────────────────────────────────┐     │
+│                     │              TOOL LAYER (agent/tools.py)        │     │
+│                     │  ┌─────────┐ ┌────────────┐ ┌────────────┐     │     │
+│                     │  │find_user│ │calculate_  │ │get_current_│     │     │
+│                     │  │         │ │refund      │ │date        │     │     │
+│                     │  └─────────┘ └────────────┘ └────────────┘     │     │
+│                     │  ┌─────────┐                                    │     │
+│                     │  │create_  │                                    │     │
+│                     │  │ticket   │                                    │     │
+│                     │  └─────────┘                                    │     │
+│                     └─────────────────────────────────────────────────┘     │
+│                                    │                                        │
+                                    ▼                                        │
+                     ┌─────────────────────────────────────────────────┐     │
+                     │              DATA LAYER (agent/data.py)         │     │
+                     │  ┌─────────────────────────────────────────┐    │     │
+                     │  │ MOCK_ORDERS_DICT (user_id → order data) │    │     │
+                     │  │                                         │    │     │
+                     │  │ user_001: {items: [Wireless Headphones, │    │     │
+                     │  │              Phone Case]}               │    │     │
+                     │  │ user_002: {items: [Laptop Stand,        │    │     │
+                     │  │              USB Cable]}                │    │     │
+                     │  │ ...                                     │    │     │
+                     │  └─────────────────────────────────────────┘    │     │
+                     └─────────────────────────────────────────────────┘     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The loop runs up to 5 iterations to prevent infinite loops.
+## Agent Loop - Detailed Flow
 
-### Observability (`agent/observability.py`)
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                         PROCESS_MESSAGE FLOW                                │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  User Input: "I want to refund Wireless Headphones"                       │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │ 1. ADD TO MEMORY                                                   │   │
+│  │    memory.append(HumanMessage(content=user_input))                │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │ 2. BUILD MESSAGES                                                  │   │
+│  │    messages = [SystemMessage(SYSTEM_PROMPT)] + memory             │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │ 3. TOOL-CALLING LOOP (max 5 iterations)                            │   │
+│  │                                                                    │   │
+│  │    ┌──────────────────────────────────────────────────────────┐   │   │
+│  │    │ ITERATION 1                                              │   │   │
+│  │    │ llm_with_tools.invoke(messages)                          │   │   │
+│  │    │   │                                                       │   │   │
+│  │    │   ├─► Returns AIMessage with tool_calls                  │   │   │
+│  │    │   │     tool_calls: [                                     │   │   │
+│  │    │   │       {"name": "get_current_date", "args": {},       │   │   │
+│  │    │   │        "id": "call_123"},                             │   │   │
+│  │    │   │       {"name": "calculate_refund", "args": {...},    │   │   │
+│  │    │   │        "id": "call_456"}                              │   │   │
+│  │    │   │     ]                                                 │   │   │
+│  │    │   │                                                       │   │   │
+│  │    │   ▼                                                       │   │   │
+│  │    │ FOR EACH TOOL CALL:                                      │   │   │
+│  │    │   1. Execute tool via _call_tool()                       │   │   │
+│  │    │   2. Add ToolMessage to memory                           │   │   │
+│  │    │   3. Continue to next iteration                          │   │   │
+│  │    └──────────────────────────────────────────────────────────┘   │   │
+│  │                    │                                              │   │
+│  │                    ▼ (if no tool_calls, but has content)         │   │
+│  │    ┌──────────────────────────────────────────────────────────┐   │   │
+│  │    │ FINAL: llm_structured.invoke(messages)                   │   │   │
+│  │    │   │                                                       │   │   │
+│  │    │   ▼ Returns Answer(response="...", continue_conversation)│   │   │
+│  │    └──────────────────────────────────────────────────────────┘   │   │
+│  │                                                                    │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │ 4. RETURN ANSWER                                                   │   │
+│  │    Answer(response="...", continue_conversation=True/False)       │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+```
 
-Extends `BaseCallbackHandler` to track:
-- LLM start/end/error with token usage and duration
-- Tool start/end/error with input/output and duration
-- Agent actions and finishes
-- Provides `get_summary()` for aggregated metrics
+## Sequence Diagram - Refund Request Flow
 
-## Mock Data
+```mermaid
+sequenceDiagram
+    participant User
+    participant Agent as RefundAgent
+    participant LLM_Tools as llm_with_tools
+    participant LLM_Struct as llm_structured
+    participant Tools as Tool Layer
+    participant Data as Mock Data
+    participant Obs as Observability
 
-4 sample users with orders:
-- `user_001`: Wireless Headphones ($99.99), Phone Case ($24.99) — 2024-03-15
-- `user_002`: Laptop Stand ($49.99), USB Cable ($12.99) — 2024-02-20
-- `user_003`: Monitor ($299.99) — 2023-11-10
-- `user_004`: Keyboard ($79.99), Mouse ($39.99) — 2024-01-05
+    User->>Agent: "I want to refund Wireless Headphones"
+    Agent->>Agent: Add to memory
+    Agent->>LLM_Tools: invoke(messages)
+    
+    Note over LLM_Tools: Decides to call tools
+    LLM_Tools-->>Agent: tool_calls: [get_current_date, calculate_refund]
+    
+    loop For each tool call
+        Agent->>Tools: _call_tool(name, args)
+        Tools->>Data: Lookup user/order data
+        Data-->>Tools: Return data
+        Tools-->>Agent: Tool result dict
+        Agent->>Obs: on_tool_start/end
+        Agent->>Agent: Add ToolMessage to memory
+    end
+    
+    Agent->>LLM_Tools: invoke(messages with tool results)
+    LLM_Tools-->>Agent: AIMessage with content (no tool calls)
+    
+    Agent->>LLM_Struct: invoke(messages)
+    Note over LLM_Struct: Enforces Answer schema via JSON Schema
+    LLM_Struct-->>Agent: Answer(response="...", continue_conversation=true)
+    Agent->>Obs: on_llm_start/end (x2)
+    
+    Agent-->>User: "Refund calculated: $99.99. Create ticket?"
+```
+
+## Two-LLM Design Pattern
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         WHY TWO LLM INSTANCES?                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Groq's Structured Output (json_schema) does NOT support tool calling.     │
+│  So we need separate LLM instances:                                         │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ llm_with_tools = base_llm.bind_tools(TOOL_SCHEMAS)                 │   │
+│  │                                                                     │   │
+│  │ Purpose:  Tool-calling reasoning loop                               │   │
+│  │ Tools:    ✅ Available (4 tools bound)                              │   │
+│  │ Output:   AIMessage with tool_calls OR content                     │   │
+│  │ Schema:   ❌ No structured output enforcement                       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                        │
+│                                    ▼ (when tools done)                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ llm_structured = base_llm.with_structured_output(                  │   │
+│  │     Answer, method="json_schema")                                  │   │
+│  │                                                                     │   │
+│  │ Purpose:  Final response formatting                                 │   │
+│  │ Tools:    ❌ Not available                                          │   │
+│  │ Output:   Answer Pydantic object (validated!)                      │   │
+│  │ Schema:   ✅ Strict JSON Schema enforcement                         │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Both share the SAME ObservabilityCallbackHandler → all calls tracked!    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Data Models
+
+### Core Models (`agent/models.py`)
+
+```python
+class Item(BaseModel):
+    name: str
+    date_bought: date
+    price: float
+
+class Order(BaseModel):
+    user_id: str
+    items: List[Item] = Field(default_factory=list)
+
+class Answer(BaseModel):
+    """STRUCTURED OUTPUT - Enforced by Groq JSON Schema"""
+    response: str
+    continue_conversation: bool = True
+```
+
+### Observability Models
+
+```python
+@dataclass
+class ObservabilityEvent:
+    timestamp: datetime = field(default_factory=datetime.now)
+    event_type: str = ""           # llm_start, llm_end, tool_start, etc.
+    thread_id: str = ""
+    details: Dict[str, Any] = field(default_factory=dict)
+    duration_ms: Optional[float] = None
+
+class ObservabilitySummary(BaseModel):
+    thread_id: str
+    total_events: int
+    total_duration_ms: float
+    tool_calls: int
+    llm_calls: int
+    tools_used: List[str]
+    errors: List[Dict[str, Any]]
+```
+
+## Tools (`agent/tools.py`)
+
+| Tool | Input | Output | Purpose |
+|------|-------|--------|---------|
+| `find_user` | `user_id: str` | User dict or error | Lookup customer |
+| `calculate_refund` | `user_data: dict`, `items: list[str]` | Refund calc + items found/not found | Calculate refund |
+| `get_current_date` | (none) | `current_date: "YYYY-MM-DD"` | Check 30-day window |
+| `create_ticket` | `user_id`, `reason`, `refund_amount` | `ticket_id: "TKT-XXXXXX"` | Escalate to support |
+
+### Tool Schema Format (for LLM)
+
+```python
+TOOL_SCHEMAS = [
+    {
+        "name": "find_user",
+        "description": "Search for a user in the system by user_id...",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "..."}
+            },
+            "required": ["user_id"]
+        }
+    },
+    # ... other tools
+]
+```
+
+## Observability System (`agent/observability.py`)
+
+### Callback Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    OBSERVABILITY CALLBACK FLOW                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ChatGroq.invoke()                                                         │
+│       │                                                                    │
+│       ▼                                                                    │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │ LangChain Core                                                     │   │
+│  │   │                                                               │   │
+│  │   ▼ on_llm_start(serialized, prompts)                             │   │
+│  │   │   ├─ Creates event_id                                        │   │
+│  │   │   ├─ Records start_time                                      │   │
+│  │   │   ├─ Appends ObservabilityEvent(event_type="llm_start")      │   │
+│  │   │   └─ Logs: "LLM START | model=... | prompt_chars=..."        │   │
+│  │   │                                                               │   │
+│  │   ▼ [LLM API CALL TO GROQ]                                        │   │
+│  │   │                                                               │   │
+│  │   ▼ on_llm_end(response)                                          │   │
+│  │       ├─ Finds matching llm_start event by event_id              │   │
+│  │       ├─ Calculates duration_ms                                  │   │
+│  │       ├─ Extracts token_usage from response.llm_output           │   │
+│  │       ├─ Appends ObservabilityEvent(event_type="llm_end",        │   │
+│  │       │   duration_ms=..., details={tokens_used: ...})           │   │
+│  │       └─ Logs: "LLM END | duration_ms=... | tokens=..."          │   │
+│  │                                                                   │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│                                    │                                        │
+│                    Same pattern for tools:                                 │
+│                                    │                                        │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │ tool.invoke()                                                      │   │
+│  │   │                                                                │   │
+│  │   ▼ on_tool_start(serialized, input_str)                         │   │
+│  │   │   ├─ Creates event_id                                        │   │
+│  │   │   ├─ Records start_time                                      │   │
+│  │   │   └─ Appends event(event_type="tool_start")                  │   │
+│  │   │                                                                │   │
+│  │   ▼ [TOOL EXECUTION]                                              │   │
+│  │   │                                                                │   │
+│  │   ▼ on_tool_end(output)                                           │   │
+│  │       ├─ Calculates duration                                     │   │
+│  │       └─ Appends event(event_type="tool_end", output=...)        │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Event Types Tracked
+
+| Event Type | Trigger | Key Fields |
+|------------|---------|------------|
+| `llm_start` | Before LLM call | `model`, `prompt_length`, `event_id` |
+| `llm_end` | LLM success | `duration_ms`, `tokens_used`, `generations` |
+| `llm_error` | LLM failure | `error`, `error_type` |
+| `tool_start` | Before tool call | `tool`, `input` |
+| `tool_end` | Tool success | `tool`, `output`, `duration_ms` |
+| `tool_error` | Tool failure | `error`, `error_type` |
+| `agent_action` | Agent picks tool | `tool`, `tool_input`, `log` |
+| `agent_finish` | Agent done | `return_values`, `log` |
+
+### Summary Aggregation
+
+```python
+def get_summary(self) -> Dict[str, Any]:
+    total_duration = sum(e.duration_ms or 0 for e in self.events)
+    tool_calls = [e for e in self.events if e.event_type == "tool_end"]
+    llm_calls = [e for e in self.events if e.event_type == "llm_end"]
+
+    return {
+        "thread_id": self.thread_id,
+        "total_events": len(self.events),
+        "total_duration_ms": total_duration,
+        "tool_calls": len(tool_calls),
+        "llm_calls": len(llm_calls),
+        "tools_used": list(set(e.details.get("tool") for e in tool_calls)),
+        "errors": [e for e in self.events 
+                   if e.event_type in ("llm_error", "tool_error")],
+    }
+```
+
+### Console Output Example
+
+```
+[Observability] Tools: 3 | LLM calls: 4 | Duration: 2450ms
+
+CONVERSATION SUMMARY
+============================================================
+Thread ID: abc-123
+Total Events: 14
+Tool Calls: 3
+LLM Calls: 4
+Tools Used: find_user, get_current_date, calculate_refund
+Total Duration: 2450ms
+Errors: 0
+============================================================
+```
+
+## Mock Data (`agent/data.py`)
+
+```python
+MOCK_ORDERS_DICT = {
+    "user_001": {
+        "user_id": "user_001",
+        "items": [
+            {"name": "Wireless Headphones", "date_bought": "2024-03-15", "price": 99.99},
+            {"name": "Phone Case", "date_bought": "2024-03-15", "price": 24.99},
+        ]
+    },
+    "user_002": {
+        "user_id": "user_002", 
+        "items": [
+            {"name": "Laptop Stand", "date_bought": "2024-02-20", "price": 49.99},
+            {"name": "USB Cable", "date_bought": "2024-02-20", "price": 12.99},
+        ]
+    },
+    # ... user_003, user_004
+}
+```
 
 ## Environment Variables
 
@@ -176,26 +509,34 @@ Extends `BaseCallbackHandler` to track:
 
 ## Dependencies
 
-See `pyproject.toml` for full list. Key dependencies:
+See `pyproject.toml`. Key packages:
 - `langchain-groq>=1.1.3` — Groq LLM integration
-- `langchain-core>=0.2.0` — Core LangChain abstractions
-- `langchain-tools>=0.1.34` — Tool decorator
-- `langgraph>=0.1.0` — InMemorySaver for checkpointer
+- `langchain-core>=0.2.0` — Core abstractions
+- `langchain-tools>=0.1.34` — `@tool` decorator
+- `langgraph>=0.1.0` — `InMemorySaver`
 - `pydantic>=2.0` — Data validation
-- `python-dotenv>=1.2.4` — Environment loading
+- `python-dotenv>=1.2.4` — Env loading
 
-## Extending
+## Extending the Agent
 
 ### Adding a New Tool
 
-1. Add function to `agent/tools.py` with `@tool` decorator
-2. Add to `TOOLS` dict in `agent/agent.py`
-3. Add schema to `TOOL_SCHEMAS` in `agent/agent.py`
-4. Update `SYSTEM_PROMPT` in `agent/prompts.py`
+1. **Add function** to `agent/tools.py` with `@tool` decorator
+2. **Register** in `TOOLS` dict in `agent/agent.py`
+3. **Add schema** to `TOOL_SCHEMAS` in `agent/agent.py`
+4. **Update prompt** in `agent/prompts.py` if needed
 
-### Adding Observability Events
+### Adding Custom Observability
 
-The `ObservabilityCallbackHandler` automatically tracks all LangChain callbacks. Custom events can be added by calling `self.events.append(ObservabilityEvent(...))` directly.
+```python
+# In any tool or agent method:
+self.observability.events.append(ObservabilityEvent(
+    event_type="custom_event",
+    thread_id=self.thread_id,
+    details={"key": "value"},
+    duration_ms=123.4
+))
+```
 
 ## License
 

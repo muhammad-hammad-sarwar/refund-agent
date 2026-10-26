@@ -112,16 +112,16 @@ The `ObservabilityCallbackHandler` extends `BaseCallbackHandler` to track all ag
 
 ### Tracked Events
 
-| Event Type | When | Data |
-|------------|------|------|
-| `llm_start` | Before LLM call | model, prompt_length |
-| `llm_end` | After LLM call | duration_ms, tokens_used, generations |
-| `llm_error` | LLM error | error, error_type |
-| `tool_start` | Before tool call | tool, input |
-| `tool_end` | After tool call | tool, output, duration_ms |
-| `tool_error` | Tool error | error, error_type |
-| `agent_action` | Agent selects tool | tool, tool_input, log |
-| `agent_finish` | Agent finishes | return_values, log |
+| Event Type     | When               | Data                                  |
+| -------------- | ------------------ | ------------------------------------- |
+| `llm_start`    | Before LLM call    | model, prompt_length                  |
+| `llm_end`      | After LLM call     | duration_ms, tokens_used, generations |
+| `llm_error`    | LLM error          | error, error_type                     |
+| `tool_start`   | Before tool call   | tool, input                           |
+| `tool_end`     | After tool call    | tool, output, duration_ms             |
+| `tool_error`   | Tool error         | error, error_type                     |
+| `agent_action` | Agent selects tool | tool, tool_input, log                 |
+| `agent_finish` | Agent finishes     | return_values, log                    |
 
 ### Summary Data
 
@@ -154,7 +154,6 @@ summary = self.observability.get_summary()
 
 - `langchain>=0.2.0`
 - `langchain-tools>=0.1.34`
-- `langchain-openai>=0.1.0`
 - `langchain-core>=0.2.0`
 - `langgraph>=0.1.0` (for InMemorySaver)
 - `python-dotenv>=1.2.4`
@@ -191,6 +190,7 @@ Defined as OpenAI function calling format in agent.py for the LLM to understand 
 ## Extending the Agent
 
 To add a new tool:
+
 1. Add tool function to `agent/tools.py` with `@tool` decorator
 2. Add to `TOOLS` dict in `agent/agent.py`
 3. Add schema to `TOOL_SCHEMAS` in `agent/agent.py`

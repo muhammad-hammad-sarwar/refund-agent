@@ -1,24 +1,24 @@
 """Simple refund agent with manual tool calling loop and structured output."""
 
-import os
 import json
 import logging
-from typing import Any, Dict, List, Optional
+import os
 from datetime import datetime
+from typing import Any
 
-from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
+from langchain_groq import ChatGroq
 
 from agent.models import Answer, ObservabilityEvent
-from agent.tools import find_user, calculate_refund, get_current_date, create_ticket
-from agent.prompts import SYSTEM_PROMPT
 from agent.observability import ObservabilityCallbackHandler
+from agent.prompts import SYSTEM_PROMPT
+from agent.tools import calculate_refund, create_ticket, find_user, get_current_date
 
 logger = logging.getLogger("refund_agent")
 
 # Tool map for easy lookup
-TOOLS: Dict[str, BaseTool] = {
+TOOLS: dict[str, BaseTool] = {
     "find_user": find_user,
     "calculate_refund": calculate_refund,
     "get_current_date": get_current_date,
@@ -33,10 +33,13 @@ TOOL_SCHEMAS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "user_id": {"type": "string", "description": "The user ID to search for (e.g., 'user_001')"}
+                "user_id": {
+                    "type": "string",
+                    "description": "The user ID to search for (e.g., 'user_001')",
+                }
             },
-            "required": ["user_id"]
-        }
+            "required": ["user_id"],
+        },
     },
     {
         "name": "calculate_refund",
@@ -44,16 +47,23 @@ TOOL_SCHEMAS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "user_data": {"type": "object", "description": "The user dict returned by find_user"},
-                "items": {"type": "array", "items": {"type": "string"}, "description": "List of item names to calculate refund for"}
+                "user_data": {
+                    "type": "object",
+                    "description": "The user dict returned by find_user",
+                },
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of item names to calculate refund for",
+                },
             },
-            "required": ["user_data", "items"]
-        }
+            "required": ["user_data", "items"],
+        },
     },
     {
         "name": "get_current_date",
         "description": "Get the current date in ISO format. Use to check 30-day refund eligibility.",
-        "parameters": {"type": "object", "properties": {}}
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "create_ticket",
@@ -62,12 +72,18 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "user_id": {"type": "string", "description": "The user ID"},
-                "reason": {"type": "string", "description": "Reason for the refund request"},
-                "refund_amount": {"type": "number", "description": "The refund amount to be processed"}
+                "reason": {
+                    "type": "string",
+                    "description": "Reason for the refund request",
+                },
+                "refund_amount": {
+                    "type": "number",
+                    "description": "The refund amount to be processed",
+                },
             },
-            "required": ["user_id", "reason", "refund_amount"]
-        }
-    }
+            "required": ["user_id", "reason", "refund_amount"],
+        },
+    },
 ]
 
 
@@ -76,10 +92,10 @@ class RefundAgent:
 
     def __init__(
         self,
-        thread_id: Optional[str] = None,
-        model_name: str = "gpt-oss-120b",
+        thread_id: str | None = None,
+        model_name: str = "",
         temperature: float = 0.1,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
     ):
         """
         Initialize the refund agent.
@@ -91,11 +107,11 @@ class RefundAgent:
             api_key: Groq API key
         """
         self.thread_id = thread_id or str(datetime.now().timestamp())
-        self.model_name = model_name
+        self.model_name = os.getenv("GROQ_MODEL")
         self.temperature = temperature
 
         # Conversation memory
-        self.memory: List[Any] = []
+        self.memory: list[Any] = []
 
         # Setup observability
         self.observability = ObservabilityCallbackHandler(self.thread_id)
@@ -103,15 +119,19 @@ class RefundAgent:
         # Setup LLM with structured output
         self.llm, self.llm_with_tools, self.llm_structured = self._create_llm(api_key)
 
-        logger.info(f"[{self.thread_id}] Agent initialized | model={model_name} | thread_id={self.thread_id}")
+        logger.info(
+            f"[{self.thread_id}] Agent initialized | model={model_name} | thread_id={self.thread_id}"
+        )
 
-    def _create_llm(self, api_key: Optional[str]):
+    def _create_llm(self, api_key: str | None):
         """Create the Groq LLM instance with structured output for Answer."""
         if api_key is None:
-            api_key = os.getenv("GROK_API_KEY")
+            api_key = os.getenv("GROQ_API_KEY")
 
         if not api_key:
-            logger.warning("No API key found for Groq. Set GROK_API_KEY environment variable.")
+            logger.warning(
+                "No API key found for Groq. Set GROQ_API_KEY environment variable."
+            )
 
         base_llm = ChatGroq(
             model=self.model_name,
@@ -128,19 +148,32 @@ class RefundAgent:
 
         return base_llm, llm_with_tools, llm_structured
 
-    def _call_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    def _call_tool(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Execute a tool and return its result."""
         logger.info(f"[{self.thread_id}] TOOL CALL | tool={tool_name} | args={args}")
         tool = TOOLS.get(tool_name)
         if not tool:
             return {"status": "error", "message": f"Unknown tool: {tool_name}"}
 
+        # Manually trigger observability for tool start
+        from langchain_core.tools import Tool
+        serialized = {"name": tool_name} if isinstance(tool, Tool) else {"name": tool_name}
+        self.observability.on_tool_start(serialized, str(args))
+
         try:
             result = tool.invoke(args)
-            logger.info(f"[{self.thread_id}] TOOL RESULT | tool={tool_name} | result={result}")
+            logger.info(
+                f"[{self.thread_id}] TOOL RESULT | tool={tool_name} | result={result}"
+            )
+            # Manually trigger observability for tool end
+            self.observability.on_tool_end(str(result))
             return result
         except Exception as e:
-            logger.error(f"[{self.thread_id}] TOOL ERROR | tool={tool_name} | error={e}")
+            logger.error(
+                f"[{self.thread_id}] TOOL ERROR | tool={tool_name} | error={e}"
+            )
+            # Manually trigger observability for tool error
+            self.observability.on_tool_error(e)
             return {"status": "error", "message": str(e)}
 
     def process_message(self, user_input: str) -> Answer:
@@ -171,7 +204,9 @@ class RefundAgent:
                 has_content = response.content and response.content.strip()
                 has_tool_calls = bool(response.tool_calls)
 
-                logger.info(f"[{self.thread_id}] LLM RESPONSE | iteration={iteration} | has_content={has_content} | has_tool_calls={has_tool_calls} | content={response.content[:100] if response.content else 'None'}")
+                logger.info(
+                    f"[{self.thread_id}] LLM RESPONSE | iteration={iteration} | has_content={has_content} | has_tool_calls={has_tool_calls} | content={response.content[:100] if response.content else 'None'}"
+                )
 
                 # Handle tool calls if any
                 if has_tool_calls:
@@ -184,10 +219,12 @@ class RefundAgent:
                         tool_result = self._call_tool(tool_name, tool_args)
 
                         # Add tool result to memory
-                        self.memory.append(ToolMessage(
-                            content=json.dumps(tool_result),
-                            tool_call_id=tool_call_id
-                        ))
+                        self.memory.append(
+                            ToolMessage(
+                                content=json.dumps(tool_result),
+                                tool_call_id=tool_call_id,
+                            )
+                        )
 
                     # Continue loop to get next LLM response with tool results
                     messages = [SystemMessage(content=SYSTEM_PROMPT)] + self.memory
@@ -221,19 +258,19 @@ class RefundAgent:
         except Exception as e:
             logger.error(f"[{self.thread_id}] PROCESS ERROR | {type(e).__name__}: {e}")
             return Answer(
-                response=f"I apologize, but I encountered an error: {str(e)}. Please try again.",
-                continue_conversation=True
+                response=f"I apologize, but I encountered an error: {e!s}. Please try again.",
+                continue_conversation=True,
             )
 
-    def get_memory(self) -> List[Any]:
+    def get_memory(self) -> list[Any]:
         """Get the current conversation memory."""
         return self.memory
 
-    def get_observability_events(self) -> List[ObservabilityEvent]:
+    def get_observability_events(self) -> list[ObservabilityEvent]:
         """Get all observability events for this conversation."""
         return self.observability.get_events()
 
-    def get_observability_summary(self) -> Dict[str, Any]:
+    def get_observability_summary(self) -> dict[str, Any]:
         """Get observability summary for this conversation."""
         return self.observability.get_summary()
 
@@ -247,7 +284,7 @@ def create_agent(
     thread_id: str,
     model_name: str = "",
     temperature: float = 0.1,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
 ) -> RefundAgent:
     """Factory function to create a RefundAgent instance."""
     return RefundAgent(
@@ -262,14 +299,16 @@ def run_conversation_loop(agent: RefundAgent) -> None:
     """
     Run the interactive conversation loop in the terminal.
     """
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Refund Agent Conversation (Thread: {agent.thread_id})")
     print(f"Model: {agent.model_name}")
-    print(f"Type 'exit' or 'quit' to end the conversation")
-    print(f"{'='*60}\n")
+    print("Type 'exit' or 'quit' to end the conversation")
+    print(f"{'=' * 60}\n")
 
     # Initial greeting
-    initial_response = agent.process_message("Hello, I'd like to start a refund request.")
+    initial_response = agent.process_message(
+        "Hello, I'd like to start a refund request."
+    )
     print(f"Agent: {initial_response.response}\n")
 
     while initial_response.continue_conversation:
@@ -277,7 +316,9 @@ def run_conversation_loop(agent: RefundAgent) -> None:
             user_input = input("You: ").strip()
 
             if user_input.lower() in ("exit", "quit", "bye"):
-                print("\nAgent: Thank you for contacting customer support. Have a great day!")
+                print(
+                    "\nAgent: Thank you for contacting customer support. Have a great day!"
+                )
                 break
 
             if not user_input:
@@ -288,7 +329,9 @@ def run_conversation_loop(agent: RefundAgent) -> None:
 
             # Print observability info
             summary = agent.get_observability_summary()
-            print(f"[Observability] Tools: {summary['tool_calls']} | LLM calls: {summary['llm_calls']} | Duration: {summary['total_duration_ms']:.0f}ms")
+            print(
+                f"[Observability] Tools: {summary['tool_calls']} | LLM calls: {summary['llm_calls']} | Duration: {summary['total_duration_ms']:.0f}ms"
+            )
 
             initial_response = response
 
@@ -300,16 +343,18 @@ def run_conversation_loop(agent: RefundAgent) -> None:
             break
 
     # Final observability report
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("CONVERSATION SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     summary = agent.get_observability_summary()
     print(f"Thread ID: {summary['thread_id']}")
     print(f"Total Events: {summary['total_events']}")
     print(f"Tool Calls: {summary['tool_calls']}")
     print(f"LLM Calls: {summary['llm_calls']}")
-    print(f"Tools Used: {', '.join(summary['tools_used']) if summary['tools_used'] else 'None'}")
+    print(
+        f"Tools Used: {', '.join(summary['tools_used']) if summary['tools_used'] else 'None'}"
+    )
     print(f"Total Duration: {summary['total_duration_ms']:.0f}ms")
-    if summary['errors']:
+    if summary["errors"]:
         print(f"Errors: {len(summary['errors'])}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")

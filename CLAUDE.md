@@ -35,7 +35,7 @@ uv sync
 uv run main.py
 
 # Run with custom model
-GROK_MODEL=openai/gpt-oss-120b uv run main.py
+GROQ_MODEL=openai/gpt-oss-120b uv run main.py
 
 # Lint/type-check (if configured)
 # (no lint config yet — add when needed)
@@ -165,8 +165,8 @@ Python >=3.14
 ## Environment Variables
 
 ```bash
-GROK_API_KEY=your_groq_api_key  # Required
-GROK_MODEL=openai/gpt-oss-120b  # Optional, defaults to gpt-oss-120b
+GROQ_API_KEY=your_groq_api_key  # Required
+GROQ_MODEL=openai/gpt-oss-120b  # Optional, defaults to gpt-oss-120b
 ```
 
 ## Key Implementation Details

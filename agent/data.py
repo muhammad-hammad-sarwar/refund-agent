@@ -4,12 +4,13 @@ from datetime import date
 
 from agent.models import Item, Order
 
-
 MOCK_ORDERS: list[Order] = [
     Order(
         user_id="user_001",
         items=[
-            Item(name="Wireless Headphones", date_bought=date(2026, 10, 10), price=99.99),
+            Item(
+                name="Wireless Headphones", date_bought=date(2026, 10, 10), price=99.99
+            ),
             Item(name="Phone Case", date_bought=date(2026, 10, 10), price=24.99),
         ],
     ),
@@ -18,7 +19,9 @@ MOCK_ORDERS: list[Order] = [
         items=[
             Item(name="Laptop Stand", date_bought=date(2026, 10, 5), price=49.99),
             Item(name="USB-C Hub", date_bought=date(2026, 10, 5), price=39.99),
-            Item(name="Mechanical Keyboard", date_bought=date(2026, 10, 5), price=129.99),
+            Item(
+                name="Mechanical Keyboard", date_bought=date(2026, 10, 5), price=129.99
+            ),
         ],
     ),
     Order(

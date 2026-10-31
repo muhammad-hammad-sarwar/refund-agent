@@ -1,10 +1,12 @@
 """Entry point for the refund agent with conversation loop."""
 
-import sys
 import os
-from pathlib import Path
+import sys
 import uuid
+from pathlib import Path
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # Add the project root to Python path
@@ -20,7 +22,7 @@ def main():
     thread_id = uuid.uuid4()
 
     # Get model from env or use default
-    model_name = os.getenv("GROK_MODEL", "grok-beta")
+    model_name = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
     print("Starting Refund Agent...")
     print(f"Model: {model_name}")

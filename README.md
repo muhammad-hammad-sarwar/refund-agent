@@ -29,7 +29,7 @@ uv sync
 
 # Copy environment example and add your API key
 cp .env.example .env
-# Edit .env and add your GROK_API_KEY
+# Edit .env and add your GROQ_API_KEY
 ```
 
 ### Running the Agent
@@ -39,7 +39,7 @@ cp .env.example .env
 uv run main.py
 
 # Run with custom model
-GROK_MODEL=openai/gpt-oss-120b
+GROQ_MODEL=openai/gpt-oss-120b
 ```
 
 ### Example Conversation
@@ -110,6 +110,17 @@ refund_agent/
 │   ├── prompts.py         # System prompt
 │   ├── agent.py           # Main agent logic
 │   └── observability.py   # Observability callback handler
+├── evals/
+│   ├── __init__.py
+│   ├── dataset.py         # Golden evaluation dataset (15 scenarios)
+│   ├── eval_llm.py        # LLM evaluation adapter
+│   ├── run_evals.py       # Main evaluation test runner
+│   ├── task_completion.py # Task completion metric
+│   ├── step_efficiency.py # Step efficiency metric
+│   ├── plan_quality.py    # Plan quality metric
+│   ├── plan_adherence.py  # Plan adherence metric
+│   ├── answer_correctness.py # Answer correctness metric
+│   └── tool_correctness.py   # Tool correctness metric
 ├── main.py                # Entry point
 ├── pyproject.toml         # Dependencies
 ├── uv.lock                # Locked dependencies
@@ -153,13 +164,13 @@ The refund agent follows a modular three-layer architecture:
 
 **Component Responsibilities:**
 
-| Layer | File | Responsibility |
-|-------|------|----------------|
-| **Entry** | `main.py` | CLI loop, user I/O |
-| **Agent** | `agent/agent.py` | Conversation loop, tool orchestration, structured output |
-| **Tools** | `agent/tools.py` | Business logic: user lookup, refund calc, date check, ticket creation |
-| **Data** | `agent/data.py` | Mock order database (`MOCK_ORDERS_DICT`) |
-| **Observability** | `agent/observability.py` | Callback handler tracking all LLM/tool calls |
+| Layer             | File                     | Responsibility                                                        |
+| ----------------- | ------------------------ | --------------------------------------------------------------------- |
+| **Entry**         | `main.py`                | CLI loop, user I/O                                                    |
+| **Agent**         | `agent/agent.py`         | Conversation loop, tool orchestration, structured output              |
+| **Tools**         | `agent/tools.py`         | Business logic: user lookup, refund calc, date check, ticket creation |
+| **Data**          | `agent/data.py`          | Mock order database (`MOCK_ORDERS_DICT`)                              |
+| **Observability** | `agent/observability.py` | Callback handler tracking all LLM/tool calls                          |
 
 ## Agent Loop - Detailed Flow
 
@@ -169,33 +180,34 @@ The `process_message` method executes a 4-step flow:
 def process_message(self, user_input: str) -> Answer:
     # 1. ADD TO MEMORY
     self.memory.append(HumanMessage(content=user_input))
-    
+
     # 2. BUILD MESSAGES
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + self.memory
-    
+
     # 3. TOOL-CALLING LOOP (max 5 iterations)
     while iteration < max_iterations:
         response = self.llm_with_tools.invoke(messages)
-        
+
         if response.tool_calls:
             # Execute each tool, add ToolMessage to memory
             for tool_call in response.tool_calls:
                 result = self._call_tool(tool_call["name"], tool_call["args"])
-                self.memory.append(ToolMessage(content=json.dumps(result), 
+                self.memory.append(ToolMessage(content=json.dumps(result),
                                                 tool_call_id=tool_call["id"]))
             messages = [SystemMessage(content=SYSTEM_PROMPT)] + self.memory
             continue  # Next iteration with tool results
-        
+
         # 4. FINAL: Structured output for Answer
         if response.content:
             answer = self.llm_structured.invoke(messages)
             return answer
-    
+
     # Fallback on max iterations
     return Answer(response="Too many iterations", continue_conversation=True)
 ```
 
 **Key Points:**
+
 - Uses `llm_with_tools` for tool-calling iterations
 - Switches to `llm_structured` (JSON Schema) for final `Answer` object
 - Max 5 iterations prevents infinite loops
@@ -247,7 +259,7 @@ Groq's Structured Output (`json_schema`) does NOT support tool calling, so we us
 ```python
 # In agent/agent.py _create_llm():
 
-base_llm = ChatGroq(model=self.model_name, temperature=self.temperature, 
+base_llm = ChatGroq(model=self.model_name, temperature=self.temperature,
                     api_key=api_key, callbacks=[self.observability])
 
 # LLM 1: Tool-calling loop (NO structured output)
@@ -268,6 +280,7 @@ llm_structured = base_llm.with_structured_output(Answer, method="json_schema")
 ```
 
 **Flow:**
+
 ```
 User Input
     │
@@ -477,8 +490,8 @@ MOCK_ORDERS_DICT = {
 
 | Variable       | Required | Default               | Description  |
 | -------------- | -------- | --------------------- | ------------ |
-| `GROK_API_KEY` | Yes      | -                     | Groq API key |
-| `GROK_MODEL`   | No       | `openai/gpt-oss-120b` | Model to use |
+| `GROQ_API_KEY` | Yes      | -                     | Groq API key |
+| `GROQ_MODEL`   | No       | `openai/gpt-oss-120b` | Model to use |
 
 ## Dependencies
 
@@ -555,17 +568,29 @@ uv sync --dev
 # Run the dataset to verify structure
 uv run python evals/dataset.py
 
-# Run full DeepEval evaluation (requires GROK_API_KEY)
-GROK_API_KEY=your_key uv run python evals/run_evals.py
+# Run full DeepEval evaluation (requires GROQ_API_KEY)
+GROQ_API_KEY=your_key uv run python evals/run_evals.py
 ```
 
-### Metrics Used
+### Metrics Used & File Structure
 
-| Metric                  | Purpose                                            | Threshold |
-| ----------------------- | -------------------------------------------------- | --------- |
-| `AnswerRelevancyMetric` | Does the response address the user's request?      | 0.7       |
-| `FaithfulnessMetric`    | Is the response factually consistent with context? | 0.7       |
-| `ToolCallingMetric`     | Were the expected tools invoked in correct order?  | 0.7       |
+Each evaluation metric is implemented in a separate dedicated module inside the `evals/` folder. We use a target threshold of **0.7** for judging performance across all metrics, with empirical benchmark scores recorded to track improvements:
+
+| Metric Name | File Path in `evals/` | Description / Purpose | Target Threshold | Observed Score / Status |
+| --- | --- | --- | --- | --- |
+| `task_completion` | `evals/task_completion.py` | Evaluates whether the agent successfully completes the refund/support task end-to-end according to user requirements | 0.7 | **53.3%** (~53.3) |
+| `step_efficiency` | `evals/step_efficiency.py` | Evaluates tool call efficiency and minimal step count compared to optimal execution path | 0.7 | **0.35** (~35%) |
+| `plan_quality` | `evals/plan_quality.py` | Evaluates the logical quality, feasibility, and correctness of execution plans | 0.7 | 0.7 (Target) |
+| `plan_adherence` | `evals/plan_adherence.py` | Evaluates how closely the agent follows its planned step sequence during execution | 0.7 | 0.7 (Target) |
+| `answer_correctness` | `evals/answer_correctness.py` | Evaluates factual accuracy and correctness of final agent response against expectations | 0.7 | 0.7 (Target) |
+| `tool_correctness` | `evals/tool_correctness.py` | Evaluates tool selection, parameter correctness, and invocation ordering | 0.7 | 0.7 (Target) |
+
+> **Threshold & Performance Summary:**
+> - **Standard Target Threshold:** `0.7` across all evaluation metrics.
+> - **Empirical Benchmark Performance:** 
+>   - `task_completion`: Currently achieving around **53.3%** (`53.3`).
+>   - `step_efficiency`: Currently achieving around **0.35** (`0.35`).
+>   - Other metrics (`plan_quality`, `plan_adherence`, `answer_correctness`, `tool_correctness`) are judged against the target threshold of **0.7**.
 
 ### Evaluation Approach & Scope
 

@@ -4,15 +4,22 @@ import os
 import sys
 
 from deepeval import evaluate
-from deepeval.metrics import AnswerRelevancyMetric, FaithfulnessMetric, ToolCallingMetric
+from deepeval.metrics import (
+    AnswerRelevancyMetric,
+    FaithfulnessMetric,
+    ToolCallingMetric,
+)
 from deepeval.models import DeepEvalBaseLLM
 from deepeval.test_case import LLMTestCase, ToolCall
+
+from evals.eval_llm import get_eval_llm
 
 # Add parent directory to path to import agent
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agent.agent import RefundAgent
 from evals.dataset import GOLDENS
+from evals.step_efficiency import run_step_efficiency_evaluation
 
 
 class RefundAgentWrapper(DeepEvalBaseLLM):
@@ -65,9 +72,10 @@ def run_evaluations():
     test_cases = convert_goldens_to_testcases(GOLDENS)
 
     # Initialize metrics
+    eval_llm = get_eval_llm()
     metrics = [
-        AnswerRelevancyMetric(threshold=0.7, model=RefundAgentWrapper()),
-        FaithfulnessMetric(threshold=0.7, model=RefundAgentWrapper()),
+        AnswerRelevancyMetric(threshold=0.7, model=eval_llm),
+        FaithfulnessMetric(threshold=0.7, model=eval_llm),
         ToolCallingMetric(threshold=0.7),  # Checks if expected tools were called
     ]
 
@@ -88,5 +96,28 @@ def run_evaluations():
     return results
 
 
-if __name__ == "__main__":
+def run_all_evaluations():
+    """Run all evaluations including step efficiency."""
+    print("=" * 70)
+    print("RUNNING ALL EVALUATIONS")
+    print("=" * 70)
+
+    # Run standard DeepEval metrics
+    print("\n[1/2] Running standard DeepEval metrics...")
     run_evaluations()
+
+    # Run step efficiency evaluation
+    print("\n[2/2] Running step efficiency evaluation...")
+    run_step_efficiency_evaluation()
+
+    print("\n" + "=" * 70)
+    print("ALL EVALUATIONS COMPLETE")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    # Load environment variables
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    run_all_evaluations()
